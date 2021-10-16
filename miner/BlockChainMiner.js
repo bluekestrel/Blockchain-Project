@@ -1,5 +1,6 @@
+const fs = require('fs');
 const SHA256 = require('crypto-js/sha256');
-const TARGET_DIFFICULTY = BigInt(0x00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff);
+const TARGET_DIFFICULTY = BigInt(0x000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff);
 const MAX_TRANSACTIONS = 10;
 
 class MemPool {
@@ -33,7 +34,7 @@ class Block {
     }
 
     addTransaction(tx) {
-        if (this.transaction.length < MAX_TRANSACTIONS) {
+        if (this.transactions.length < MAX_TRANSACTIONS) {
             this.transactions.push(tx);
         }
     }
@@ -49,12 +50,13 @@ class Block {
     execute() {
         // TODO: add-on, may implement if I get far enough to warrant U/TXOs
         // something lke: this.transactions.forEach(x => x.execute()); assuming what gets pushed
-        // to transactions is a transaction object
+        // to transactions is a Transaction class instance
     }
 }
 
 class Chain {
-    constructor() {
+    constructor(file) {
+        this.blockChainFile = file;
         this.blocks = this.getCurrentChain();
     }
 
@@ -62,7 +64,17 @@ class Chain {
         // TODO: this method will request the current chain from other existing blockchain miners
         //       by sending out a request via a websocket - for the time being this method will
         //       just return an empty list
-        return [];
+
+        // If there are no other existing blockchain miners, then the websocket won't
+        // return anything, so there needs to be a timeout (TODO) so that if nothing is
+        // sent the first blockchain miner can read the past chain from a JSON file
+        try {
+            let initChain = fs.readFileSync(this.blockChainFile);
+            return JSON.parse(initChain);
+        }
+        catch {
+            return [];
+        }
     }
 
     addBlock(block) {
@@ -76,27 +88,34 @@ class Chain {
     }
 }
 
+const handler = () => new Promise((res) => {
+    setTimeout(res, 0);
+});
+
 class Miner {
-    constructor(address) {
-        // address is the pubkey (aka address) of the miner
-        this.address = address;
+    constructor(address, chainFile) {
+        this.address = address; // address is the pubkey of the miner
+        this.chainFile = chainFile
         this.blockToMine = null; // this where the new block to be mined will be stored
-        this.blockChain = new Chain(); // instantiate the blockchain for this miner
+        this.blockChain = new Chain(this.chainFile); // instantiate the blockchain for this miner
         this.mempool = new MemPool(); // instatiate the mempool for this miner
     }
 
-    startMining() {
+    async startMining() {
         // Attempt to mine for blocks while simultaneously checking for any new blocks that may
         // have been mined somewhere else via the websocket and checking to see if any new
         // transactions have been requested
 
         while(true) {
             // Infinite mining!
+            await handler();
             this.blockToMine = new Block();
+            // Add the initial reward transaction for mining the block
+            this.blockToMine.addTransaction({address: this.address, amount: '6.25'});
 
             // TODO: need to also subscribe to the client websocket to make sure any new transactions
             //       requested by a client get added to the mempool
-            for (let i = 0; i < MAX_TRANSACTIONS; i++) {
+            for (let i = 1; i < MAX_TRANSACTIONS; i++) {
                 let transaction = this.mempool.removeTransaction();
 
                 if (transaction) {
@@ -112,26 +131,47 @@ class Miner {
             //       again so the new transaction will get added to the block
 
             let newBlockHash = this.blockToMine.hash();
-            while (BigInt`0x${newBlockHash}` > TARGET_DIFFICULTY) {
+            while (BigInt(`0x${newBlockHash}`) > TARGET_DIFFICULTY) {
+                await handler();
                 this.blockToMine.nonce += 1;
                 newBlockHash = this.blockToMine.hash();
             }
 
             this.blockToMine.blockHash = newBlockHash;
             this.blockChain.addBlock(this.blockToMine);
+            console.log(`Added new block ${JSON.stringify(this.blockToMine)} to the blockchain`)
             // TODO: publish new block to the miner websocket to inform the other miners that they
             //       need to include the new block in their respective blockchains
         }
     }
 
     stopMining() {
-        // TODO: save blockchain state to JSON file to pick back up from where the miner left off
+        // Save blockchain state to JSON file to pick back up from where the miner left off
+        console.log(`Stopping mining process, writing blockchain state to: ${this.chainFile}`);
+        fs.writeFileSync(this.chainFile, JSON.stringify(this.blockChain.blocks));
     }
 }
 
-// TODO: make a 'main' so that if a miner wanted to start mining they could call node BlockChainMiner
-//       which would instantiate the Miner class and start the miner
-//       Could then listen for CTRL-C in an infinite loop which would then call stopMining
+async function initializeMiner(cliArgs) {
+    console.log(cliArgs);
+    miningInstance = new Miner(cliArgs[2], cliArgs[3]);
+    console.log(JSON.stringify(miningInstance));
+
+    miningInstance.startMining();
+}
+
+
+// main
+let miningInstance = null;
+
+process.on('SIGINT', () => {
+    console.log("CTRL-C detected, exiting")
+    miningInstance.stopMining();
+    process.exit();
+})
+
+initializeMiner(process.argv);
+// end main
 
 module.exports = {
     TARGET_DIFFICULTY,
