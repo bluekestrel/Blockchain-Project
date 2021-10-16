@@ -1,0 +1,25 @@
+Blockchain-Project plan:
+1. Make the PoW miner (use code from coding exercise)
+    a. redis would be nice to use as the mempool for transactions instead of just storing it 'raw'
+       in the program's own memory (could OOM)
+2. Persist the PoW miner (can use read/write File and save as JSON)
+    a. something like writeFile(JSON.stringify(blockchain object))
+    b. where the blockchain object is just the linked list with hash that links the nodes together
+       + any other information to store in the node itself (like transactions, pubkey, etc.)
+    c. each 'node' is a block that can hold a certain number of transactions (hardcode this number
+       to like 5 or something small and manageable)
+3. Go go gadget blockchain api
+    a. Use the front end from ECDSA-Exchange as a base view, also b/c I don't know how to front end
+    b. Would prefer NOT to make an express server because I don't think it can do pub/sub
+       Need to find a server/client model that uses websockets instead so that way I can
+       have multiple publishers (aka clients) and multiple subscribers (aka blockchain nodes)
+4. Inter-blockchain node communication
+    a. moar pub/sub
+    b. Each blockchain node can subscribe to a specified websocket that any new blockchain transaction
+       would come from - that way all the clients can publish to the same websocket and all the
+       blockchain nodes can subscibe to said websocket
+    c. Each blockchain node would also need to publish/subscibe to another websocket that would
+       be used for inter-blockchain node communication i.e. when a blockchain node successfully
+       mines a new block and adds transactions it would need to publish that info to the websocket
+       to inform the other miners to update their linked lists (aka their version of the blockchain)
+       with the new block and remove the transaction from their transaction pool
