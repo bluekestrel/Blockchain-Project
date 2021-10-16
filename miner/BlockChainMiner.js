@@ -31,6 +31,7 @@ class Block {
         this.timestamp = Date.now();
         this.nonce = 0;
         this.transactions = [];
+        this.prevHash = 0;
     }
 
     addTransaction(tx) {
@@ -79,8 +80,6 @@ class Chain {
 
     addBlock(block) {
         this.blocks.push(block);
-        // TODO: need to publish the creation of a new block over the websocket so that the other
-        //       miners are aware of a new block on the chain
     }
 
     blockHeight() {
@@ -110,6 +109,13 @@ class Miner {
             // Infinite mining!
             await handler();
             this.blockToMine = new Block();
+
+            // Set the prevHash for the new block
+            let chainHeight = this.blockChain.blockHeight();
+            if (chainHeight !== 0) {
+                this.blockToMine.prevHash = this.blockChain.blocks[chainHeight - 1].blockHash;
+            }
+
             // Add the initial reward transaction for mining the block
             this.blockToMine.addTransaction({address: this.address, amount: '6.25'});
 
