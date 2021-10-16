@@ -1,7 +1,19 @@
-const fs = require('fs');
 const SHA256 = require('crypto-js/sha256');
+const { hasSubscribers } = require('diagnostics_channel');
+const fs = require('fs');
+const redis = require('redis');
+
+// Create the MinerPub and MinerSub channels that all mining instances should publish/subscribe to
+const minerPublisher = redis.createClient();
+const minerSubscriber = redis.createClient();
+
+// Create a separate setupSub channel for initializing the blockchain when a miner starts up
+const setupSubscriber = redis.createClient();
+
 const TARGET_DIFFICULTY = BigInt(0x000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff);
 const MAX_TRANSACTIONS = 10;
+const MINER_CHANNEL = "miner-notify"
+const SETUP_CHANNEL = "setup-notify"
 
 class MemPool {
     constructor() {
@@ -62,13 +74,9 @@ class Chain {
     }
 
     getCurrentChain() {
-        // TODO: this method will request the current chain from other existing blockchain miners
-        //       by sending out a request via a websocket - for the time being this method will
-        //       just return an empty list
+        // Fire off a request to the MINER_CHANNEL for a copy of the most up-to-date blockchain
+        minerPublisher.publish(MINER_CHANNEL, "request-chain");
 
-        // If there are no other existing blockchain miners, then the websocket won't
-        // return anything, so there needs to be a timeout (TODO) so that if nothing is
-        // sent the first blockchain miner can read the past chain from a JSON file
         try {
             let initChain = fs.readFileSync(this.blockChainFile);
             return JSON.parse(initChain);
@@ -146,8 +154,7 @@ class Miner {
             this.blockToMine.blockHash = newBlockHash;
             this.blockChain.addBlock(this.blockToMine);
             console.log(`Added new block ${JSON.stringify(this.blockToMine)} to the blockchain`)
-            // TODO: publish new block to the miner websocket to inform the other miners that they
-            //       need to include the new block in their respective blockchains
+            //minerPublisher.publish(MINER_CHANNEL, JSON.stringify(this.blockToMine));
         }
     }
 
@@ -166,12 +173,38 @@ async function initializeMiner(cliArgs) {
     miningInstance.startMining();
 }
 
-
 // main
 let miningInstance = null;
 
+minerSubscriber.on("message", (channel, message) => {
+    if (channel !== SETUP_CHANNEL) {
+        console.log(`Received message ${message} from channel ${channel}`);
+        // depending on the message received, the miner may need to respond with
+        // data or update their own data i.e. if a miner is requesting the current blockchain then
+        // the miner nneds to respond back with the blockchain and if a miner publishes a new block
+        // then the other miners need to add the new block to their blockchains and restart
+        // their mining loop
+
+        if (message === "request-chain") {
+            minerPublisher.publish(SETUP_CHANNEL, JSON.stringify(miningInstance.blockChain.blocks));
+        }
+    }
+});
+
+setupSubscriber.on("message", (channel, message) => {
+    // TODO: assume that whatever message is received is the most current blockchain,
+    //       need to check and make sure that the blockchain the miner has is equivalent
+    //       to the one received here
+    console.log(`Received message ${message} from channel ${channel}`);
+    setupSubscriber.unsubscribe(SETUP_CHANNEL);
+    setupSubscriber.quit();
+})
+
+minerSubscriber.subscribe(MINER_CHANNEL);
+setupSubscriber.subscribe(SETUP_CHANNEL);
+
 process.on('SIGINT', () => {
-    console.log("CTRL-C detected, exiting")
+    console.log("\nCTRL-C detected, exiting")
     miningInstance.stopMining();
     process.exit();
 })
