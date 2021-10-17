@@ -1,23 +1,28 @@
 const SHA256 = require('crypto-js/sha256');
-const { hasSubscribers } = require('diagnostics_channel');
 const fs = require('fs');
 const redis = require('redis');
 
-// Create the MinerPub and MinerSub channels that all mining instances should publish/subscribe to
+// Create the MinerPub and MinerSub clients that all mining instances should publish/subscribe to
 const minerPublisher = redis.createClient();
 const minerSubscriber = redis.createClient();
 
-// Create a separate setupSub channel for initializing the blockchain when a miner starts up
+// Create a separate setupSub client for initializing the blockchain when a miner starts up
 const setupSubscriber = redis.createClient();
+
+// Create another pair of pub/sub clients that interact with an actual client
+const clientPublisher = redis.createClient();
+const clientSubscriber = redis.createClient();
 
 const TARGET_DIFFICULTY = BigInt(0x000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff);
 const MAX_TRANSACTIONS = 10;
 const MINER_CHANNEL = "miner-notify"
 const SETUP_CHANNEL = "setup-notify"
+const CLIENT_CHANNEL = "client-notify"
 
 class MemPool {
     constructor() {
         this.transactionPool = [];
+        this.updated = false;
     }
 
     addTransaction(transaction) {
@@ -186,7 +191,7 @@ class Miner {
 
             let newBlockHash = this.blockToMine.hash();
             while (BigInt(`0x${newBlockHash}`) > TARGET_DIFFICULTY) {
-                if (this.blockChain.chainUpdated) {
+                if (this.blockChain.chainUpdated || this.mempool.updated) {
                     break;
                 }
 
@@ -198,6 +203,12 @@ class Miner {
             if (this.blockChain.chainUpdated) {
                 this.repopulateMemPool(this.blockToMine.transactions);
                 this.blockChain.chainUpdated = false;
+                continue;
+            }
+
+            if (this.mempool.updated) {
+                this.repopulateMemPool(this.blockToMine.transactions);
+                this.mempool.updated = false;
                 continue;
             }
 
@@ -218,14 +229,17 @@ class Miner {
     }
 
     stopMining() {
-        // Save blockchain state to JSON file to pick back up from where the miner left off
-        console.log(`Stopping mining process, writing blockchain state to: ${this.chainFile}`);
-        fs.writeFileSync(this.chainFile, JSON.stringify(this.blockChain.blocks));
+        if (this.chainFile) {
+            // Save blockchain state to JSON file to pick back up from where the miner left off
+            console.log(`Stopping mining process, writing blockchain state to: ${this.chainFile}`);
+            fs.writeFileSync(this.chainFile, JSON.stringify(this.blockChain.blocks));
+        }
     }
 }
 
 async function initializeMiner(cliArgs) {
     console.log(cliArgs);
+    // TODO: if null is provided for the miner address, generate a new pub/private key and use that
     miningInstance = new Miner(cliArgs[2], cliArgs[3]);
     console.log(JSON.stringify(miningInstance));
 
@@ -262,8 +276,24 @@ setupSubscriber.on("message", (channel, message) => {
     setupSubscriber.quit();
 })
 
+clientSubscriber.on("message", (channel, message) => {
+    if (channel === CLIENT_CHANNEL) {
+        console.log(`Received message ${message} from channel ${channel}`)
+        if (message["new-transaction"] !== undefined) {
+            // client has sent a new transaction to be added to the blockchain, add the new
+            // transaction message to the mempool and set the updated flag to true
+            miningInstance.mempool.addTransaction(message["new_transaction"]);
+            miningInstance.mempool.updated = true;
+        }
+        else if (message === "request-chain") {
+            clientPublisher.publish(CLIENT_CHANNEL, JSON.stringify(miningInstance.blockChain.blocks));
+        }
+    }
+})
+
 minerSubscriber.subscribe(MINER_CHANNEL);
 setupSubscriber.subscribe(SETUP_CHANNEL);
+clientSubscriber.subscribe(CLIENT_CHANNEL);
 
 process.on('SIGINT', () => {
     console.log("\nCTRL-C detected, exiting")
