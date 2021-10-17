@@ -11,15 +11,22 @@
     "url": "git+https://github.com/bluekestrel/Blockchain-Project.git"
   },
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/bluekestrel/Blockchain-Project/issues"
   },
   "homepage": "https://github.com/bluekestrel/Blockchain-Project#readme",
-  "dependencies": {},
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.17.1"
+  },
   "devDependencies": {
+    "@parcel/transformer-sass": "^2.0.0-rc.0",
     "crypto-js": "^4.1.1",
+    "elliptic": "^6.5.4",
     "fs": "0.0.1-security",
-    "redis": "^3.1.2"
+    "parcel": "^2.0.0-rc.0",
+    "redis": "^3.1.2",
+    "sass": "^1.26.7"
   }
 }
