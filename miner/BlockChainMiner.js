@@ -17,20 +17,15 @@ const SETUP_CHANNEL = "setup-notify"
 
 class MemPool {
     constructor() {
-        // TODO: instatiate a local redis instance to store transactions, subscribe to a websocket
-        //       that will be filled by clients requesting transactions
-        // for now just make an empty list
         this.transactionPool = [];
     }
 
     addTransaction(transaction) {
-        // TODO: add transaction to mempool by pushing it to redis instance
         this.transactionPool.push(transaction);
     }
 
     removeTransaction() {
         if (this.transactionPool) {
-            // TODO: remove transaction from mempool by pulling it from redis instance
             return this.transactionPool.pop();
         }
 
@@ -71,6 +66,7 @@ class Chain {
     constructor(file) {
         this.blockChainFile = file;
         this.blocks = this.getCurrentChain();
+        this.chainUpdated = false;
     }
 
     getCurrentChain() {
@@ -92,6 +88,50 @@ class Chain {
 
     blockHeight() {
         return this.blocks.length;
+    }
+
+    updateChain(block) {
+        // Update blochchain with new chain, set update flag to true so that when execution goes
+        // back to mine loop it knows that an async event has occured so it needs to restart
+        // its mining process
+        const { timestamp, nonce, transactions, prevHash } = block;
+        const computedHash = block.blockHash;
+        let currBlockHash = 0;
+
+        if (this.blockHeight() !== 0) {
+            currBlockHash = this.blocks[this.blockHeight() - 1].blockHash;
+
+            if (BigInt(`0x${currBlockHash}`) === BigInt(`0x${computedHash}`)) {
+                // pub/sub broadcasts to every subscriber, which includes the subscriber instance
+                // of the miner that published the new block notification, so duplicates are possible
+                // just return if the 'new' block is actually this miner's current block
+                return;
+            }
+        }
+
+        let checkBlock = new Block();
+        checkBlock.timestamp = timestamp;
+        checkBlock.nonce = nonce;
+        checkBlock.transactions = transactions;
+        checkBlock.prevHash = prevHash;
+        let checkBlockHash = checkBlock.hash();
+
+        if (BigInt(`0x${checkBlockHash}`) === BigInt(`0x${computedHash}`)) {
+            console.log("Computed hash matches reported block hash");
+
+            if (currBlockHash) {
+                if (BigInt(`0x${currBlockHash}`) === BigInt(`0x${block.prevHash}`)) {
+                    console.log("Previous block hash of newly mined block matches current block hash");
+                    // Now that the new block has been verified, add it to this miner's blockchain
+                    this.addBlock(block);
+                    this.chainUpdated = true;
+                }
+            }
+            else {
+                this.addBlock(block);
+                this.chainUpdated = true;
+            }
+        }
     }
 }
 
@@ -140,21 +180,40 @@ class Miner {
                 }
             }
 
-            // TODO: if at _any_ point during this inner loop a new transaction appears, need to
-            //       put all the transactions back in to the mempool and start the inner loop
-            //       again so the new transaction will get added to the block
+            // If at _any_ point during this inner loop a new transaction appears, need to
+            // put all the transactions back in to the mempool and start the inner loop
+            // again so the new transaction will get added to the block
 
             let newBlockHash = this.blockToMine.hash();
             while (BigInt(`0x${newBlockHash}`) > TARGET_DIFFICULTY) {
+                if (this.blockChain.chainUpdated) {
+                    break;
+                }
+
                 await handler();
                 this.blockToMine.nonce += 1;
                 newBlockHash = this.blockToMine.hash();
             }
 
+            if (this.blockChain.chainUpdated) {
+                this.repopulateMemPool(this.blockToMine.transactions);
+                this.blockChain.chainUpdated = false;
+                continue;
+            }
+
             this.blockToMine.blockHash = newBlockHash;
             this.blockChain.addBlock(this.blockToMine);
             console.log(`Added new block ${JSON.stringify(this.blockToMine)} to the blockchain`)
-            //minerPublisher.publish(MINER_CHANNEL, JSON.stringify(this.blockToMine));
+            minerPublisher.publish(MINER_CHANNEL, JSON.stringify(this.blockToMine));
+        }
+    }
+
+    repopulateMemPool(transactions) {
+        for (let i = transactions.length - 1; i > 1; i--) {
+            // Why not i > 0? Because the first transaction is always the reward for mining a block,
+            // don't want to repeat that one because that transaction only occurs when the block
+            // is mined by a particular miner
+            this.mempool.addTransaction(transactions.pop());
         }
     }
 
@@ -188,14 +247,17 @@ minerSubscriber.on("message", (channel, message) => {
         if (message === "request-chain") {
             minerPublisher.publish(SETUP_CHANNEL, JSON.stringify(miningInstance.blockChain.blocks));
         }
+        else {
+            // assume message is a new block, update this miner's blockchain accordingly
+            miningInstance.blockChain.updateChain(JSON.parse(message));
+        }
     }
 });
 
 setupSubscriber.on("message", (channel, message) => {
-    // TODO: assume that whatever message is received is the most current blockchain,
-    //       need to check and make sure that the blockchain the miner has is equivalent
-    //       to the one received here
-    console.log(`Received message ${message} from channel ${channel}`);
+    console.log(`Received updated chain from channel ${channel}`);
+    miningInstance.blockChain.blocks = JSON.parse(message);
+    miningInstance.blockChain.chainUpdated = true;
     setupSubscriber.unsubscribe(SETUP_CHANNEL);
     setupSubscriber.quit();
 })
