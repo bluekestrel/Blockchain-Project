@@ -1,6 +1,9 @@
-const SHA256 = require('crypto-js/sha256');
+const crypto = require('crypto');
+const EC = require('elliptic').ec;
+const ec = new EC('secp256k1');
 const fs = require('fs');
 const redis = require('redis');
+const SHA256 = require('crypto-js/sha256');
 
 // Create the MinerPub and MinerSub clients that all mining instances should publish/subscribe to
 const minerPublisher = redis.createClient();
@@ -15,6 +18,7 @@ const clientSubscriber = redis.createClient();
 
 const TARGET_DIFFICULTY = BigInt(0x000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff);
 const MAX_TRANSACTIONS = 10;
+const REWARD = 6.25; // reward for successfully mining a new block
 const MINER_CHANNEL = "miner-notify"
 const SETUP_CHANNEL = "setup-notify"
 const CLIENT_CHANNEL = "client-notify"
@@ -145,12 +149,47 @@ const handler = () => new Promise((res) => {
 });
 
 class Miner {
-    constructor(address, chainFile) {
-        this.address = address; // address is the pubkey of the miner
-        this.chainFile = chainFile
+    constructor(chainFile) {
+        const new_key = ec.genKeyPair();
+        const pubkey = new_key.getPublic().encode('hex').toString(16);
+        const privkey = new_key.getPrivate().toString(16);
+
+        this.address = pubkey;
+        this.key = privkey;
+        this.chainFile = chainFile;
         this.blockToMine = null; // this where the new block to be mined will be stored
         this.blockChain = new Chain(this.chainFile); // instantiate the blockchain for this miner
         this.mempool = new MemPool(); // instatiate the mempool for this miner
+    }
+
+    generateRewardTransaction() {
+        const key = ec.keyFromPrivate(this.key);
+        let nonce = crypto.randomBytes(16).toString('hex');
+
+        // We'll use the sender + amount + recipient + a nonce as the message to hash
+        // In this case the sender === recipient who is the miner to receive the reward for
+        // mining a new block
+        let address = this.address;
+        let message = JSON.stringify({
+            address, REWARD, address, nonce
+        });
+        let messageHash = SHA256(message).toString();
+
+        // Sign the hash and save the r and s values to an object
+        let signature = key.sign(messageHash);
+        let signObj = {'signature': {
+            r: signature.r.toString(16),
+            s: signature.s.toString(16)
+        }};
+
+        let newTransaction = {
+            sender: address,
+            amount: REWARD,
+            recipient: address,
+            message_hash: messageHash,
+            sign_obj: signObj,
+        };
+        return newTransaction
     }
 
     async startMining() {
@@ -170,7 +209,7 @@ class Miner {
             }
 
             // Add the initial reward transaction for mining the block
-            this.blockToMine.addTransaction({address: this.address, amount: '6.25'});
+            this.blockToMine.addTransaction(this.generateRewardTransaction());
 
             // TODO: need to also subscribe to the client websocket to make sure any new transactions
             //       requested by a client get added to the mempool
@@ -214,8 +253,11 @@ class Miner {
 
             this.blockToMine.blockHash = newBlockHash;
             this.blockChain.addBlock(this.blockToMine);
-            console.log(`Added new block ${JSON.stringify(this.blockToMine)} to the blockchain`)
+            console.log(`Added new block ${JSON.stringify(this.blockToMine)} to the blockchain`);
             minerPublisher.publish(MINER_CHANNEL, JSON.stringify(this.blockToMine));
+
+            let newBlock = {"new_block": [this.blockToMine]};
+            clientPublisher.publish(CLIENT_CHANNEL, JSON.stringify(newBlock));
         }
     }
 
@@ -239,10 +281,11 @@ class Miner {
 
 async function initializeMiner(cliArgs) {
     console.log(cliArgs);
-    // TODO: if null is provided for the miner address, generate a new pub/private key and use that
-    miningInstance = new Miner(cliArgs[2], cliArgs[3]);
+    miningInstance = new Miner(cliArgs[2]);
+    console.log("\n\n=============================================");
+    console.log(`Public Key: ${miningInstance.address}, Private key: ${miningInstance.key}`);
+    console.log("=============================================\n\n");
     console.log(JSON.stringify(miningInstance));
-
     miningInstance.startMining();
 }
 
@@ -250,21 +293,18 @@ async function initializeMiner(cliArgs) {
 let miningInstance = null;
 
 minerSubscriber.on("message", (channel, message) => {
-    if (channel !== SETUP_CHANNEL) {
-        console.log(`Received message ${message} from channel ${channel}`);
-        // depending on the message received, the miner may need to respond with
-        // data or update their own data i.e. if a miner is requesting the current blockchain then
-        // the miner nneds to respond back with the blockchain and if a miner publishes a new block
-        // then the other miners need to add the new block to their blockchains and restart
-        // their mining loop
+    // Depending on the message received, the miner may need to respond with
+    // data or update their own data i.e. if a miner is requesting the current blockchain then
+    // the miner nneds to respond back with the blockchain and if a miner publishes a new block
+    // then the other miners need to add the new block to their blockchains and restart
+    // their mining loop
 
-        if (message === "request-chain") {
-            minerPublisher.publish(SETUP_CHANNEL, JSON.stringify(miningInstance.blockChain.blocks));
-        }
-        else {
-            // assume message is a new block, update this miner's blockchain accordingly
-            miningInstance.blockChain.updateChain(JSON.parse(message));
-        }
+    if (message === "request-chain") {
+        minerPublisher.publish(SETUP_CHANNEL, JSON.stringify(miningInstance.blockChain.blocks));
+    }
+    else {
+        // assume message is a new block, update this miner's blockchain accordingly
+        miningInstance.blockChain.updateChain(JSON.parse(message));
     }
 });
 
@@ -274,22 +314,24 @@ setupSubscriber.on("message", (channel, message) => {
     miningInstance.blockChain.chainUpdated = true;
     setupSubscriber.unsubscribe(SETUP_CHANNEL);
     setupSubscriber.quit();
-})
+});
 
 clientSubscriber.on("message", (channel, message) => {
-    if (channel === CLIENT_CHANNEL) {
-        console.log(`Received message ${message} from channel ${channel}`)
+    if (message === "request-chain") {
+        let chain = {"current_chain": miningInstance.blockChain.blocks};
+        clientPublisher.publish(CLIENT_CHANNEL, JSON.stringify(chain));
+    }
+    else {
+        message = JSON.parse(message);
         if (message["new-transaction"] !== undefined) {
+            console.log(`Received message ${message} from channel ${channel}`)
             // client has sent a new transaction to be added to the blockchain, add the new
             // transaction message to the mempool and set the updated flag to true
             miningInstance.mempool.addTransaction(message["new_transaction"]);
             miningInstance.mempool.updated = true;
         }
-        else if (message === "request-chain") {
-            clientPublisher.publish(CLIENT_CHANNEL, JSON.stringify(miningInstance.blockChain.blocks));
-        }
     }
-})
+});
 
 minerSubscriber.subscribe(MINER_CHANNEL);
 setupSubscriber.subscribe(SETUP_CHANNEL);
@@ -299,7 +341,7 @@ process.on('SIGINT', () => {
     console.log("\nCTRL-C detected, exiting")
     miningInstance.stopMining();
     process.exit();
-})
+});
 
 initializeMiner(process.argv);
 // end main

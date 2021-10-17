@@ -1,43 +1,61 @@
-const express = require('express');
 const cors = require('cors');
 const EC = require('elliptic').ec;
-const SHA256 = require('crypto-js/sha256');
+const express = require('express');
+const redis = require('redis');
 
 const app = express();
 const ec = new EC('secp256k1');
-const port = 3042;
-const INIT_BALANCE_LEN = 3; // arbitrarily set to 3
+const PORT = 3042;
+
+// Create pair of pub/sub clients so that the server-client can communicate with the blockchain miners
+const clientPublisher = redis.createClient();
+const clientSubscriber = redis.createClient();
+const CLIENT_CHANNEL = "client-notify"
+
+clientSubscriber.subscribe(CLIENT_CHANNEL);
+
+// requestUpdate is a flag that lets the client keep track of whether it needs to pay attention to
+// messages that come in from the CLIENT_CHANNEl
+let requestedUpdate = false;
+let balances = {};
 
 // localhost can have cross origin errors
 // depending on the browser you use!
 app.use(cors());
 app.use(express.json());
 
-function random_balance(min, max) {
-  return Math.floor(Math.random() * (max - min + 1) + min);
-}
+function updateBalances(blocks) {
+  blocks.forEach((block) => {
+    block.transactions.forEach((transaction) => {
+      let {sender, recipient, amount, ...otherMetadata} = transaction;
 
-function generate_balances_and_keys() {
-  let balances = {};
-  let keys = [];
-  for (let i = 0; i < INIT_BALANCE_LEN; i++) {
-    // Create the public/private key pair, and generate a balance
-    const new_key = ec.genKeyPair();
-    const pubkey = new_key.getPublic().encode('hex').toString(16);
-    const privkey = new_key.getPrivate().toString(16);
-    const init_balance = random_balance(10, 100);
-
-    balances[pubkey] = init_balance;
-    keys.push({
-      'publickey' : pubkey,
-      'privatekey': privkey
+      if (!(sender in balances) || !(recipient in balances)) {
+        if (sender === recipient) {
+          balances[sender] = amount;
+        }
+        else {
+          if (!(sender in balances)) {
+            balances[sender] = 0;
+          }
+          if (!(recipient in balances)) {
+            balances[recipient] = amount;
+          }
+        }
+      }
+      else {
+        if (sender === recipient) {
+          balances[sender] += amount;
+        }
+        else {
+          balances[sender] -= amount;
+          balances[recipient] += amount;
+        }
+      }
     });
-  }
-
-  return {balances, keys};
+  });
 }
 
-function print_accounts() {
+function printAccounts() {
   console.log("\nAvailable Accounts\n====================");
   let i = 0;
   for (let key in balances) {
@@ -46,14 +64,10 @@ function print_accounts() {
     i++;
   }
 
-  console.log("\nPrivate Keys\n====================");
-  for (let i = 0; i < keys.length; i++) {
-    let str_to_print = `(${i}) ${keys[i].privatekey}`
-    console.log(str_to_print);
-  }
+  console.log("====================\n")
 }
 
-function verify_account(publickey, message_hash, signature) {
+function verifyAccount(publickey, message_hash, signature) {
   let key = null;
   try {
     key = ec.keyFromPublic(publickey, 'hex');
@@ -70,8 +84,6 @@ function verify_account(publickey, message_hash, signature) {
   }
 }
 
-let {balances, keys} = generate_balances_and_keys();
-
 app.get('/balance/:address', (req, res) => {
   const {address} = req.params;
   const balance = balances[address] || 0;
@@ -83,7 +95,7 @@ app.post('/send', (req, res) => {
   console.log(req.body);
 
   if (balances[sender] >= amount) {
-    if (!verify_account(sender, message_hash, sign_obj['signature'])) {
+    if (!verifyAccount(sender, message_hash, sign_obj['signature'])) {
       res.send({ balance: 'Public key does not match signature' });
       return;
     }
@@ -97,7 +109,36 @@ app.post('/send', (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Listening on port ${port}!`);
-  print_accounts();
+app.listen(PORT, () => {
+  console.log(`Listening on port ${PORT}!`);
+  clientPublisher.publish(CLIENT_CHANNEL, "request-chain");
+  requestedUpdate = true;
+});
+
+clientSubscriber.on("message", (channel, message) => {
+  console.log(`Received message ${message} from channel ${channel}`);
+
+  try {
+    message = JSON.parse(message);
+  }
+  catch {
+    // if message is not a JSON string, then just return
+    return;
+  }
+
+  if (requestedUpdate) {
+    if (message["current_chain"] !== undefined) {
+      requestedUpdate = false;
+      updateBalances(message["current_chain"]);
+      printAccounts();
+    }
+    else {
+      clientPublisher.publish(CLIENT_CHANNEL, "request-chain");
+    }
+  }
+
+  if (message["new_block"] !== undefined) {
+    updateBalances(message["new_block"]);
+    printAccounts();
+  }
 });
