@@ -92,7 +92,6 @@ app.get('/balance/:address', (req, res) => {
 
 app.post('/send', (req, res) => {
   const {sender, recipient, amount, message_hash, sign_obj} = req.body;
-  console.log(req.body);
 
   if (balances[sender] >= amount) {
     if (!verifyAccount(sender, message_hash, sign_obj['signature'])) {
@@ -100,9 +99,9 @@ app.post('/send', (req, res) => {
       return;
     }
 
-    balances[sender] -= amount;
-    balances[recipient] = (balances[recipient] || 0) + +amount;
-    res.send({ balance: balances[sender] });
+    // Inform blockchain miners that a new transaction needs to be processed
+    let newTransaction = {"new-transaction": req.body};
+    clientPublisher.publish(CLIENT_CHANNEL, JSON.stringify(newTransaction));
   }
   else {
     res.send({ balance: 'Balance too low' });
@@ -139,6 +138,5 @@ clientSubscriber.on("message", (channel, message) => {
 
   if (message["new_block"] !== undefined) {
     updateBalances(message["new_block"]);
-    printAccounts();
   }
 });

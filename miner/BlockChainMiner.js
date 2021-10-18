@@ -16,7 +16,7 @@ const setupSubscriber = redis.createClient();
 const clientPublisher = redis.createClient();
 const clientSubscriber = redis.createClient();
 
-const TARGET_DIFFICULTY = BigInt(0x000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff);
+const TARGET_DIFFICULTY = BigInt(0x0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff);
 const MAX_TRANSACTIONS = 10;
 const REWARD = 6.25; // reward for successfully mining a new block
 const MINER_CHANNEL = "miner-notify"
@@ -34,7 +34,7 @@ class MemPool {
     }
 
     removeTransaction() {
-        if (this.transactionPool) {
+        if (this.transactionPool.length >= 1) {
             return this.transactionPool.pop();
         }
 
@@ -211,8 +211,6 @@ class Miner {
             // Add the initial reward transaction for mining the block
             this.blockToMine.addTransaction(this.generateRewardTransaction());
 
-            // TODO: need to also subscribe to the client websocket to make sure any new transactions
-            //       requested by a client get added to the mempool
             for (let i = 1; i < MAX_TRANSACTIONS; i++) {
                 let transaction = this.mempool.removeTransaction();
 
@@ -239,14 +237,9 @@ class Miner {
                 newBlockHash = this.blockToMine.hash();
             }
 
-            if (this.blockChain.chainUpdated) {
+            if (this.blockChain.chainUpdated || this.mempool.updated) {
                 this.repopulateMemPool(this.blockToMine.transactions);
                 this.blockChain.chainUpdated = false;
-                continue;
-            }
-
-            if (this.mempool.updated) {
-                this.repopulateMemPool(this.blockToMine.transactions);
                 this.mempool.updated = false;
                 continue;
             }
@@ -262,10 +255,8 @@ class Miner {
     }
 
     repopulateMemPool(transactions) {
-        for (let i = transactions.length - 1; i > 1; i--) {
-            // Why not i > 0? Because the first transaction is always the reward for mining a block,
-            // don't want to repeat that one because that transaction only occurs when the block
-            // is mined by a particular miner
+        console.log("Repopulating mempool");
+        for (let i = transactions.length - 1; i >= 1; i--) {
             this.mempool.addTransaction(transactions.pop());
         }
     }
@@ -280,7 +271,6 @@ class Miner {
 }
 
 async function initializeMiner(cliArgs) {
-    console.log(cliArgs);
     miningInstance = new Miner(cliArgs[2]);
     console.log("\n\n=============================================");
     console.log(`Public Key: ${miningInstance.address}, Private key: ${miningInstance.key}`);
@@ -312,8 +302,14 @@ setupSubscriber.on("message", (channel, message) => {
     console.log(`Received updated chain from channel ${channel}`);
     miningInstance.blockChain.blocks = JSON.parse(message);
     miningInstance.blockChain.chainUpdated = true;
-    setupSubscriber.unsubscribe(SETUP_CHANNEL);
-    setupSubscriber.quit();
+    
+    try {
+        setupSubscriber.unsubscribe(SETUP_CHANNEL);
+        setupSubscriber.quit();
+    }
+    catch(err) {
+        console.log(err);
+    }
 });
 
 clientSubscriber.on("message", (channel, message) => {
@@ -324,10 +320,10 @@ clientSubscriber.on("message", (channel, message) => {
     else {
         message = JSON.parse(message);
         if (message["new-transaction"] !== undefined) {
-            console.log(`Received message ${message} from channel ${channel}`)
+            console.log(`Received message ${JSON.stringify(message)} from channel ${channel}`)
             // client has sent a new transaction to be added to the blockchain, add the new
             // transaction message to the mempool and set the updated flag to true
-            miningInstance.mempool.addTransaction(message["new_transaction"]);
+            miningInstance.mempool.addTransaction(message["new-transaction"]);
             miningInstance.mempool.updated = true;
         }
     }
